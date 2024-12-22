@@ -6,19 +6,32 @@ from typing import List, Tuple, Optional
 import warnings
 import matplotlib.pyplot as plt
 from yield_curve import YieldCurve
-import yield_curve
 
 @dataclass
 class HW2FParameters:
-    """Parameters for Hull-White 2 Factor model"""
-    lambda1: float  # Mean reversion speed for first factor
-    lambda2: float  # Mean reversion speed for second factor
-    sigma1: float  # Volatility of first factor
-    sigma2: float  # Volatility of second factor
-    rho: float     # Correlation between factors
+    """
+    Parameters for Hull-White 2 Factor model
+
+    Attributes:
+        lambda1: Mean reversion speed for first factor
+        lambda2: Mean reversion speed for second factor
+        sigma1: Volatility of first factor
+        sigma2: Volatility of second factor
+        rho: Correlation between factors
+    """
+    lambda1: float
+    lambda2: float
+    sigma1: float
+    sigma2: float
+    rho: float
     
 class HullWhite2Factor:
-    """Hull-White 2 Factor interest rate model calibrator"""
+    """
+    Hull-White 2 Factor interest rate model calibrator
+
+    This class implements the calibration of the Hull-White 2 Factor model
+    to market swaption volatilities.
+    """
     
     def __init__(self, 
                  yield_curve: YieldCurve,
@@ -29,8 +42,7 @@ class HullWhite2Factor:
         Initialize the HW2F calibrator
         
         Args:
-            zero_rates: Array of zero rates
-            rate_times: Time points for zero rates
+            yield_curve: YieldCurve object containing zero rates and times
             swaption_vols: Matrix of ATM swaption volatilities
             option_maturities: Option expiry times
             swap_tenors: Underlying swap tenors
@@ -41,7 +53,15 @@ class HullWhite2Factor:
         self.swap_tenors = swap_tenors
         
     def _discount_factor(self, t: float) -> float:
-        """Calculate discount factor for time t"""
+        """
+        Calculate discount factor for time t
+
+        Args:
+            t: Time for which to calculate the discount factor
+
+        Returns:
+            float: Discount factor at time t
+        """
         if t == 0:
             return 1.0
         idx = np.searchsorted(self.yield_curve.get_time, t)
@@ -57,6 +77,14 @@ class HullWhite2Factor:
         """
         Calculate model swaption volatility under HW2F
         Using the analytical approximation for ATM swaptions
+
+        Args:
+            params: HW2FParameters object containing model parameters
+            option_maturity: Option expiry time
+            swap_tenor: Underlying swap tenor
+
+        Returns:
+            float: Model swaption volatility
         """
         k1, k2 = params.lambda1, params.lambda2
         s1, s2 = params.sigma1, params.sigma2
@@ -79,7 +107,15 @@ class HullWhite2Factor:
         return np.sqrt(total_var / T)
     
     def _objective_function(self, x: np.ndarray) -> float:
-        """Objective function for calibration"""
+        """
+        Objective function for calibration
+
+        Args:
+            x: Array of model parameters
+
+        Returns:
+            float: Sum of squared errors between model and market volatilities
+        """
         params = HW2FParameters(
             lambda1=abs(x[0]),
             lambda2=abs(x[1]),
@@ -109,7 +145,7 @@ class HullWhite2Factor:
             Calibrated HW2F parameters
         """
         if initial_guess is None:
-            x0 = np.array([0.01, 0.01, 0.01, 0.01, 0.0])
+            x0 = np.array([0.01, 0.01, 0.01, 0.01, -0.82])
         else:
             x0 = np.array([
                 initial_guess.lambda1,
@@ -121,8 +157,8 @@ class HullWhite2Factor:
             
         # Parameter bounds
         bounds = [
-            (1e-4, 1.0),  # lambda1
-            (1e-4, 1.0),  # lambda2
+            (1e-4, 6.0),  # lambda1
+            (1e-4, 6.0),  # lambda2
             (1e-4, 1.0),  # sigma1
             (1e-4, 1.0),  # sigma2
             (-1.0, 1.0)   # rho
@@ -146,15 +182,42 @@ class HullWhite2Factor:
             rho=max(min(result.x[4], 1.0), -1.0)
         )
     
+    def generate_paths(self, params: HW2FParameters, num_paths: int, num_steps: int):
+        """
+        Generate paths from the HW2F model using Monte Carlo simulation
+        
+        Args:
+            params: HW2F model parameters
+            num_paths: Number of paths to simulate
+            num_steps: Number of time steps per path
+            
+        Returns:
+            Array of shape (num_paths, num_steps) containing simulated rates
+        """
+        dt = self.yield_curve.get_time[-1] / num_steps
+        rates = np.zeros((num_paths, num_steps))
+        x1 = np.zeros((num_paths, num_steps)) 
+        x2 = np.zeros((num_paths, num_steps))
+        
+        # Generate correlated random numbers
+        z1 = np.random.standard_normal((num_paths, num_steps-1))
+        z2 = params.rho * z1 + np.sqrt(1 - params.rho**2) * np.random.standard_normal((num_paths, num_steps-1))
+        
+        # Create time points for interpolation
+        sim_times = np.linspace(0, self.yield_curve.get_time[-1], num_steps)
+        # Interpolate the initial rates for all time points
+        initial_rates = np.interp(sim_times, self.yield_curve.get_time, self.yield_curve.get_rate)
+        
+        # Initial rates
+        rates[:,0] = initial_rates[0]
+        
+        # Generate paths using Euler discretization
+        for j in range(1, num_steps):
+            x1[:,j] = x1[:,j-1] - params.lambda1 * x1[:,j-1] * dt + params.sigma1 * np.sqrt(dt) * z1[:,j-1]
+            x2[:,j] = x2[:,j-1] - params.lambda2 * x2[:,j-1] * dt + params.sigma2 * np.sqrt(dt) * z2[:,j-1]
+            rates[:,j] = initial_rates[j] + x1[:,j] + x2[:,j]
+            
+        return rates
+    
 if __name__ == "__main__":
-    yield_curve = YieldCurve(np.array([0, 1, 2, 3, 4]), np.array([0.01, 0.013, 0.021, 0.025, 0.027]))
-    swaption_vols = np.array([[0.01, 0.014, 0.02, 0.025, 0.03],
-                             [0.02, 0.022, 0.025, 0.03, 0.035],
-                             [0.02, 0.024, 0.028, 0.035, 0.04]])
-    option_maturities = np.array([1, 2, 3])
-    swap_tenors = np.array([1, 2, 3])
-    hw2f = HullWhite2Factor(yield_curve, swaption_vols, option_maturities, swap_tenors)
-    params = hw2f.calibrate()
-    print(params)
-    plt.plot(yield_curve.get_time, yield_curve.get_rate)
-    plt.show()
+    pass
